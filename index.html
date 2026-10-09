@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SignSetu: Interactive Sign Language Learning & Interpreter</title>
+    
+    <!-- Dependencies -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    
+    <!-- Babel: lets the browser understand the JSX below (Google AI Studio does this step for you) -->
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.29.10/babel.min.js"></script>
+
+    <!-- React & Icons -->
+    <script type="importmap">
+        {
+            "imports": {
+                "react": "https://esm.sh/react@18.2.0",
+                "react-dom/client": "https://esm.sh/react-dom@18.2.0/client?external=react",
+                "lucide-react": "https://esm.sh/lucide-react@0.263.0?external=react"
+            }
+        }
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background: #f0f2f5; }
+        .video-container { position: relative; width: 100%; max-width: 640px; border-radius: 12px; overflow: hidden; background: #000; }
+        .canvas-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        .mirror { transform: scaleX(-1); }
+        .glass { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(10px); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef, useMemo } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+            Camera as CameraIcon, BookOpen, GraduationCap, Languages, PlayCircle, 
+            Settings, Info, Trash2, Volume2, ArrowLeft, CheckCircle2, 
+            Download, Save, AlertCircle
+        } from 'lucide-react';
+
+        const APP_NAME = "SignSetu";
+
+        // --- DATASET DEFINITIONS ---
+        const SIGN_DATA = {
+            ASL: [
+                { id: 'A', label: 'A', hint: 'Fist with thumb on side', type: 'alphabet' },
+                { id: 'B', label: 'B', hint: 'Flat palm, thumb tucked', type: 'alphabet' },
+                { id: 'C', label: 'C', hint: 'Curved hand like a C', type: 'alphabet' },
+                { id: 'L', label: 'L', hint: 'Thumb and Index extended', type: 'alphabet' },
+                { id: 'V', label: 'V', hint: 'Peace sign (Index + Middle)', type: 'alphabet' },
+                { id: 'Y', label: 'Y', hint: 'Thumb and Pinky extended', type: 'alphabet' },
+                { id: '1', label: '1', hint: 'Index finger up', type: 'number' },
+                { id: 'HELLO', label: 'Hello', hint: 'Salute from forehead', type: 'word' }
+            ],
+            ISL: [
+                { id: 'A_ISL', label: 'A', hindi: 'अ', hint: 'One hand fist, other wraps', type: 'alphabet' },
+                { id: 'NAMASTE', label: 'Namaste', hindi: 'नमस्ते', hint: 'Both palms together', type: 'word' },
+                { id: 'DHANYAVAD', label: 'Thank You', hindi: 'धन्यवाद', hint: 'Hand from chin to front', type: 'word' },
+                { id: 'PAANI', label: 'Water', hindi: 'पानी', hint: 'V-sign touching chin', type: 'word' }
+            ]
+        };
+
+        // Defined outside App so React doesn't re-create it on every render
+        const ModeCard = ({ icon, title, desc, onClick, color }) => (
+            <div 
+                onClick={onClick}
+                className={`p-8 bg-white border-2 rounded-3xl cursor-pointer transition-all hover:shadow-xl transform hover:-translate-y-1 ${color}`}
+            >
+                <div className="mb-4">{icon}</div>
+                <h3 className="text-xl font-bold mb-2">{title}</h3>
+                <p className="text-gray-500">{desc}</p>
+            </div>
+        );
+
+        function App() {
+            const [mode, setMode] = useState('HOME'); // HOME, LEARN, PRACTICE, QUIZ, TRANSLATE, ABOUT
+            const [lang, setLang] = useState('ASL');
+            const [detectedSign, setDetectedSign] = useState(null);
+            const [sentence, setSentence] = useState([]);
+            const [isCameraReady, setIsCameraReady] = useState(false);
+            const [collectedData, setCollectedData] = useState([]);
+            const [progress, setProgress] = useState(JSON.parse(localStorage.getItem('signsetu_progress') || '{}'));
+
+            // MediaPipe Refs
+            const videoRef = useRef(null);
+            const canvasRef = useRef(null);
+            const handsRef = useRef(null);
+            const cameraRef = useRef(null);
+
+            // --- RECOGNITION LOGIC (Heuristic) ---
+            const recognizeHandGesture = (landmarks, handedness) => {
+                // Simplified rule-based logic for the "Senior Dev" MVP
+                // 1. Identify finger states (0 = folded, 1 = extended)
+                const fingers = {
+                    thumb: landmarks[4].x < landmarks[3].x, // Basic horizontal check
+                    index: landmarks[8].y < landmarks[6].y,
+                    middle: landmarks[12].y < landmarks[10].y,
+                    ring: landmarks[16].y < landmarks[14].y,
+                    pinky: landmarks[20].y < landmarks[18].y
+                };
+
+                // Logic for "V" (Peace)
+                if (fingers.index && fingers.middle && !fingers.ring && !fingers.pinky) return "V";
+                // Logic for "L"
+                if (fingers.index && !fingers.middle && !fingers.ring && !fingers.pinky) return "L";
+                // Logic for "Y"
+                if (!fingers.index && !fingers.middle && !fingers.ring && fingers.pinky) return "Y";
+                // Logic for "B"
+                if (fingers.index && fingers.middle && fingers.ring && fingers.pinky) return "B";
+                
+                return null;
+            };
+
+            // --- MEDIAPIPE INITIALIZATION ---
+            useEffect(() => {
+                if (mode === 'HOME' || mode === 'ABOUT' || mode === 'LEARN') {
+                    if (cameraRef.current) cameraRef.current.stop();
+                    return;
+                }
+
+                const hands = new window.Hands({
+                    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+                });
+
+                hands.setOptions({
+                    maxNumHands: 2,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.7,
+                    minTrackingConfidence: 0.7
+                });
+
+                hands.onResults((results) => {
+                    const ctx = canvasRef.current.getContext('2d');
+                    ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+                    
+                    if (results.multiHandLandmarks) {
+                        for (const landmarks of results.multiHandLandmarks) {
+                            window.drawConnectors(ctx, landmarks, window.HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 5});
+                            window.drawLandmarks(ctx, landmarks, {color: '#FF0000', lineWidth: 2});
+                            
+                            const sign = recognizeHandGesture(landmarks, null);
+                            if (sign) setDetectedSign(sign);
+                        }
+                    } else {
+                        setDetectedSign(null);
+                    }
+                });
+
+                handsRef.current = hands;
+
+                if (videoRef.current) {
+                    const camera = new window.Camera(videoRef.current, {
+                        onFrame: async () => {
+                            await hands.send({ image: videoRef.current });
+                        },
+                        width: 640,
+                        height: 480
+                    });
+                    camera.start();
+                    cameraRef.current = camera;
+                    setIsCameraReady(true);
+                }
+            }, [mode]);
+
+            // --- SPEECH API ---
+            const speak = (text) => {
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = lang === 'ISL' ? 'hi-IN' : 'en-US';
+                window.speechSynthesis.speak(utterance);
+            };
+
+            // --- UI COMPONENTS ---
+            const Header = () => (
+                <nav className="flex items-center justify-between p-6 glass mb-6 rounded-2xl shadow-sm">
+                    <div className="flex items-center gap-2 cursor-pointer" onClick={() => setMode('HOME')}>
+                        <div className="bg-indigo-600 p-2 rounded-lg text-white">
+                            <Languages size={24} />
+                        </div>
+                        <h1 className="text-2xl font-bold tracking-tight text-indigo-900">{APP_NAME}</h1>
+                    </div>
+                    <div className="flex items-center gap-4">
+                        <button 
+                            onClick={() => setLang(lang === 'ASL' ? 'ISL' : 'ASL')}
+                            className="px-4 py-2 rounded-full font-semibold transition bg-indigo-100 text-indigo-700 hover:bg-indigo-200"
+                        >
+                            {lang === 'ASL' ? '🇺🇸 ASL' : '🇮🇳 ISL (हिन्दी)'}
+                        </button>
+                        <button onClick={() => setMode('ABOUT')} className="text-gray-500 hover:text-indigo-600">
+                            <Info size={24} />
+                        </button>
+                    </div>
+                </nav>
+            );
+
+            const HomeScreen = () => (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
+                    <ModeCard 
+                        icon={<BookOpen className="text-blue-500" />} 
+                        title={lang === 'ASL' ? "Learn" : "सीखें (Learn)"} 
+                        desc="Browse the sign library and tutorials" 
+                        onClick={() => setMode('LEARN')}
+                        color="border-blue-200 hover:bg-blue-50"
+                    />
+                    <ModeCard 
+                        icon={<PlayCircle className="text-green-500" />} 
+                        title={lang === 'ASL' ? "Practice" : "अभ्यास (Practice)"} 
+                        desc="Test your signs with real-time feedback" 
+                        onClick={() => setMode('PRACTICE')}
+                        color="border-green-200 hover:bg-green-50"
+                    />
+                    <ModeCard 
+                        icon={<GraduationCap className="text-purple-500" />} 
+                        title={lang === 'ASL' ? "Quiz" : "परीक्षा (Quiz)"} 
+                        desc="Challenges to test your proficiency" 
+                        onClick={() => setMode('QUIZ')}
+                        color="border-purple-200 hover:bg-purple-50"
+                    />
+                    <ModeCard 
+                        icon={<CameraIcon className="text-red-500" />} 
+                        title={lang === 'ASL' ? "Translate" : "अनुवाद (Translate)"} 
+                        desc="Real-time sign-to-speech interpreter" 
+                        onClick={() => setMode('TRANSLATE')}
+                        color="border-red-200 hover:bg-red-50"
+                    />
+                </div>
+            );
+
+            const LearnMode = () => (
+                <div className="space-y-6">
+                    <button onClick={() => setMode('HOME')} className="flex items-center gap-2 text-indigo-600 font-medium">
+                        <ArrowLeft size={20} /> Back to Home
+                    </button>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                        {SIGN_DATA[lang].map(sign => (
+                            <div key={sign.id} className="bg-white p-4 rounded-xl border hover:border-indigo-400 transition shadow-sm group">
+                                <div className="h-24 bg-gray-50 rounded-lg mb-3 flex items-center justify-center text-3xl">
+                                    {/* Placeholder for SVG/Emoji Illustrations */}
+                                    🤟
+                                </div>
+                                <h4 className="font-bold text-lg">{sign.label}</h4>
+                                {sign.hindi && <p className="text-indigo-600 text-sm">{sign.hindi}</p>}
+                                <p className="text-xs text-gray-400 mt-2 leading-tight">{sign.hint}</p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+
+            const CameraView = () => (
+                <div className="flex flex-col lg:flex-row gap-6">
+                    <div className="flex-1">
+                        <div className="video-container shadow-2xl border-4 border-white">
+                            <video ref={videoRef} className="mirror" width="640" height="480" autoPlay playsInline muted />
+                            <canvas ref={canvasRef} className="canvas-overlay mirror" width="640" height="480" />
+                            
+                            {!isCameraReady && (
+                                <div className="absolute inset-0 flex items-center justify-center bg-black text-white">
+                                    <div className="text-center">
+                                        <CameraIcon className="mx-auto mb-4 animate-pulse" size={48} />
+                                        <p>Initializing Camera...</p>
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="absolute bottom-4 left-4 bg-black/50 text-white px-3 py-1 rounded-full text-xs">
+                                {detectedSign ? `Detected: ${detectedSign}` : "No hand detected"}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="w-full lg:w-80 space-y-4">
+                        {mode === 'TRANSLATE' && (
+                            <div className="bg-white p-6 rounded-3xl shadow-sm border h-full flex flex-col">
+                                <h3 className="font-bold text-gray-700 mb-4 uppercase text-xs tracking-widest">Interpreter Output</h3>
+                                <div className="flex-1 text-4xl font-bold text-indigo-600 break-words">
+                                    {sentence.join("")}
+                                    <span className="animate-pulse">|</span>
+                                </div>
+                                <div className="mt-6 flex gap-2">
+                                    <button 
+                                        onClick={() => sentence.length > 0 && speak(sentence.join(""))}
+                                        className="flex-1 bg-indigo-600 text-white py-3 rounded-xl flex items-center justify-center gap-2"
+                                    >
+                                        <Volume2 size={20} /> Speak
+                                    </button>
+                                    <button 
+                                        onClick={() => setSentence([])}
+                                        className="p-3 bg-gray-100 text-gray-600 rounded-xl"
+                                    >
+                                        <Trash2 size={20} />
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {mode === 'PRACTICE' && (
+                            <div className="bg-white p-6 rounded-3xl shadow-sm border">
+                                <h3 className="font-bold text-gray-700 mb-2 uppercase text-xs tracking-widest">Practice Target</h3>
+                                <div className="text-6xl font-black text-indigo-600 mb-4">V</div>
+                                <p className="text-gray-500 text-sm mb-6">Instruction: Raise your index and middle finger like a peace sign.</p>
+                                
+                                {detectedSign === 'V' ? (
+                                    <div className="bg-green-100 text-green-700 p-4 rounded-2xl flex items-center gap-3 animate-bounce">
+                                        <CheckCircle2 /> <span className="font-bold">Correct!</span>
+                                    </div>
+                                ) : (
+                                    <div className="bg-gray-50 text-gray-400 p-4 rounded-2xl border-2 border-dashed text-center">
+                                        Perform the sign...
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+
+            const AboutPage = () => (
+                <div className="max-w-3xl mx-auto bg-white p-10 rounded-3xl shadow-sm border space-y-6">
+                    <h2 className="text-3xl font-bold text-indigo-900">Project Abstract</h2>
+                    <p className="text-gray-600 leading-relaxed">
+                        <b>SignSetu</b> is a bridge between the hearing and the speech-impaired community. 
+                        By leveraging MediaPipe's high-fidelity hand tracking, this application provides 
+                        an interactive platform to learn and interpret American Sign Language (ASL) and 
+                        Indian Sign Language (ISL).
+                    </p>
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div className="p-4 bg-indigo-50 rounded-xl">
+                            <h4 className="font-bold mb-1">Tech Stack</h4>
+                            <p>React, MediaPipe Hands, Web Speech API, Tailwind CSS</p>
+                        </div>
+                        <div className="p-4 bg-orange-50 rounded-xl">
+                            <h4 className="font-bold mb-1">Limitations</h4>
+                            <p>Requires good lighting; currently uses rule-based logic for static signs.</p>
+                        </div>
+                    </div>
+                    <button onClick={() => setMode('HOME')} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold">
+                        Start Learning
+                    </button>
+                </div>
+            );
+
+            // Trigger sentence building in Translate mode
+            useEffect(() => {
+                if (mode === 'TRANSLATE' && detectedSign) {
+                    const lastChar = sentence[sentence.length - 1];
+                    if (detectedSign !== lastChar) {
+                        setSentence(prev => [...prev, detectedSign]);
+                    }
+                }
+            }, [detectedSign]);
+
+            return (
+                <div className="min-h-screen p-4 md:p-8 max-w-6xl mx-auto">
+                    {Header()}
+                    
+                    <main>
+                        {mode === 'HOME' && HomeScreen()}
+                        {mode === 'LEARN' && LearnMode()}
+                        {mode === 'ABOUT' && AboutPage()}
+                        {(mode === 'PRACTICE' || mode === 'TRANSLATE' || mode === 'QUIZ') && (
+                            <div className="space-y-6">
+                                <div className="flex items-center justify-between">
+                                    <button onClick={() => setMode('HOME')} className="flex items-center gap-2 text-indigo-600 font-medium">
+                                        <ArrowLeft size={20} /> Exit {mode}
+                                    </button>
+                                    <div className="flex gap-2">
+                                        <button 
+                                            onClick={() => {
+                                                // Data Collection Helper for ML Training
+                                                const sample = { label: detectedSign || 'NONE', landmarks: collectedData };
+                                                const blob = new Blob([JSON.stringify(sample)], {type: 'application/json'});
+                                                const url = URL.createObjectURL(blob);
+                                                const a = document.createElement('a');
+                                                a.href = url;
+                                                a.download = `sign_data_${Date.now()}.json`;
+                                                a.click();
+                                            }}
+                                            className="text-xs bg-gray-200 px-3 py-1 rounded flex items-center gap-1 hover:bg-gray-300"
+                                        >
+                                            <Download size={14} /> Collect Data
+                                        </button>
+                                    </div>
+                                </div>
+                                {CameraView()}
+                            </div>
+                        )}
+                    </main>
+
+                    <footer className="mt-12 text-center text-gray-400 text-sm">
+                        &copy; 2024 SignSetu Interpreter Project • Built with MediaPipe & React
+                    </footer>
+                </div>
+            );
+        }
+
+        createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
